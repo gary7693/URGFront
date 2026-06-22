@@ -410,7 +410,7 @@ export default function LidarPage() {
   const activeConfig = deviceConfigs[activeDeviceName]
 
   return (
-    <div className="flex flex-col h-screen bg-slate-900 text-slate-100">
+    <div className="flex flex-col h-dvh bg-slate-900 text-slate-100">
 
       {/* ── Top toolbar ── */}
       <div className="flex flex-wrap items-center gap-3 px-4 py-2 bg-slate-800 border-b border-slate-700 shrink-0">
@@ -561,7 +561,13 @@ export default function LidarPage() {
         />
 
         {/* 縮放按鈕（觸控裝置 / 精準縮放） */}
-        <div className="absolute bottom-3 right-3 flex flex-col gap-1.5 select-none">
+        <div
+          className="absolute bottom-3 right-3 flex flex-col gap-1.5 select-none"
+          style={{
+            bottom: 'calc(0.75rem + env(safe-area-inset-bottom))',
+            right:  'calc(0.75rem + env(safe-area-inset-right))',
+          }}
+        >
           <button
             onClick={() => zoomBy(1.2)}
             className="w-10 h-10 rounded bg-slate-800/80 hover:bg-slate-700 text-slate-200
@@ -599,7 +605,10 @@ export default function LidarPage() {
       </div>
 
       {/* ── Footer ── */}
-      <div className="px-4 py-1 bg-slate-800 border-t border-slate-700 text-xs text-slate-500 shrink-0">
+      <div
+        className="px-4 py-1 bg-slate-800 border-t border-slate-700 text-xs text-slate-500 shrink-0"
+        style={{ paddingBottom: 'calc(0.25rem + env(safe-area-inset-bottom))' }}
+      >
         Broker 需啟用 WebSocket（Mosquitto: <span className="font-mono">listener 9001 / protocol websockets</span>）
       </div>
     </div>
