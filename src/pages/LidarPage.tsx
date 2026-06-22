@@ -292,16 +292,52 @@ export default function LidarPage() {
     return () => ro.disconnect()
   }, [])
 
+  // Shared zoom helper (wheel / pinch / buttons all funnel through here)
+  const zoomBy = useCallback((factor: number) => {
+    scaleRef.current = Math.min(2000, Math.max(10, scaleRef.current * factor))
+    setScale(scaleRef.current)
+  }, [])
+
   useEffect(() => {
     const canvas = canvasRef.current; if (!canvas) return
     const onWheel = (e: WheelEvent) => {
       e.preventDefault()
-      scaleRef.current = Math.min(2000, Math.max(10, scaleRef.current * (e.deltaY < 0 ? 1.1 : 0.9)))
-      setScale(scaleRef.current)
+      zoomBy(e.deltaY < 0 ? 1.1 : 0.9)
     }
     canvas.addEventListener('wheel', onWheel, { passive: false })
     return () => canvas.removeEventListener('wheel', onWheel)
-  }, [])
+  }, [zoomBy])
+
+  // Pinch-to-zoom for touch devices (phones / tablets)
+  useEffect(() => {
+    const canvas = canvasRef.current; if (!canvas) return
+    let lastDist = 0
+    const dist = (t: TouchList) =>
+      Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY)
+
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length === 2) { lastDist = dist(e.touches); e.preventDefault() }
+    }
+    const onTouchMove = (e: TouchEvent) => {
+      if (e.touches.length !== 2) return
+      e.preventDefault()
+      const d = dist(e.touches)
+      if (lastDist > 0) zoomBy(d / lastDist)
+      lastDist = d
+    }
+    const onTouchEnd = (e: TouchEvent) => { if (e.touches.length < 2) lastDist = 0 }
+
+    canvas.addEventListener('touchstart', onTouchStart, { passive: false })
+    canvas.addEventListener('touchmove',  onTouchMove,  { passive: false })
+    canvas.addEventListener('touchend',   onTouchEnd)
+    canvas.addEventListener('touchcancel', onTouchEnd)
+    return () => {
+      canvas.removeEventListener('touchstart', onTouchStart)
+      canvas.removeEventListener('touchmove',  onTouchMove)
+      canvas.removeEventListener('touchend',   onTouchEnd)
+      canvas.removeEventListener('touchcancel', onTouchEnd)
+    }
+  }, [zoomBy])
 
   // Simulation mouse handlers
   useEffect(() => {
@@ -429,7 +465,7 @@ export default function LidarPage() {
 
         <span className="ml-auto text-xs text-slate-500">
           縮放 <span className="text-slate-300">{scale.toFixed(0)} px/m</span>
-          <span className="ml-1">(滾輪)</span>
+          <span className="ml-1">(滾輪／雙指／按鈕)</span>
         </span>
       </div>
 
@@ -518,7 +554,29 @@ export default function LidarPage() {
 
       {/* ── Canvas ── */}
       <div className="flex-1 relative overflow-hidden">
-        <canvas ref={canvasRef} className={`w-full h-full block ${simMode ? 'cursor-crosshair' : ''}`} />
+        <canvas
+          ref={canvasRef}
+          style={{ touchAction: 'none' }}
+          className={`w-full h-full block ${simMode ? 'cursor-crosshair' : ''}`}
+        />
+
+        {/* 縮放按鈕（觸控裝置 / 精準縮放） */}
+        <div className="absolute bottom-3 right-3 flex flex-col gap-1.5 select-none">
+          <button
+            onClick={() => zoomBy(1.2)}
+            className="w-10 h-10 rounded bg-slate-800/80 hover:bg-slate-700 text-slate-200
+                       text-2xl leading-none flex items-center justify-center"
+            title="放大" aria-label="放大">
+            +
+          </button>
+          <button
+            onClick={() => zoomBy(1 / 1.2)}
+            className="w-10 h-10 rounded bg-slate-800/80 hover:bg-slate-700 text-slate-200
+                       text-2xl leading-none flex items-center justify-center"
+            title="縮小" aria-label="縮小">
+            −
+          </button>
+        </div>
         {!connected && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
             <p className="text-slate-500 text-sm">輸入 Broker 位址後按「連線」</p>
