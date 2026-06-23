@@ -330,6 +330,29 @@ export default function LidarPage() {
     offsetRef.current = { x: 0, y: 0 }
   }, [])
 
+  // ── Simulation helpers (shared by mouse + touch) ──
+  const clientToMeters = useCallback((clientX: number, clientY: number) => {
+    const canvas = canvasRef.current!
+    const { x: mx, y: my } = clientToCanvas(clientX, clientY)
+    const X = (mx - (canvas.width  / 2 + offsetRef.current.x)) / scaleRef.current
+    const Y = ((canvas.height / 2 + offsetRef.current.y) - my) / scaleRef.current
+    return { X, Y }
+  }, [clientToCanvas])
+
+  const simSendAt = useCallback((clientX: number, clientY: number) => {
+    const cfg = deviceConfigsRef.current[activeDeviceNameRef.current]
+    if (!cfg) return
+    const { X, Y } = clientToMeters(clientX, clientY)
+    const distance = parseFloat(Math.sqrt(X * X + Y * Y).toFixed(3))
+    publish(cfg.topicObjects, JSON.stringify([{ id: simIdRef.current++, X, Y, width: 0.3, distance, pointCount: 5 }]))
+  }, [clientToMeters, publish])
+
+  const simClear = useCallback(() => {
+    const cfg = deviceConfigsRef.current[activeDeviceNameRef.current]
+    if (cfg) publish(cfg.topicObjects, '[]')
+    simActiveRef.current = false
+  }, [publish])
+
   // Mouse wheel → zoom toward cursor
   useEffect(() => {
     const canvas = canvasRef.current; if (!canvas) return
@@ -367,8 +390,10 @@ export default function LidarPage() {
       if (e.touches.length === 2) {
         lastDist = dist(e.touches); lastMid = mid(e.touches); panLast = null
         e.preventDefault()
-      } else if (e.touches.length === 1 && !simMode) {
-        panLast = { x: e.touches[0].clientX, y: e.touches[0].clientY }
+      } else if (e.touches.length === 1) {
+        e.preventDefault()
+        if (simMode) { simActiveRef.current = true; simSendAt(e.touches[0].clientX, e.touches[0].clientY) }
+        else { panLast = { x: e.touches[0].clientX, y: e.touches[0].clientY } }
       }
     }
     const onTouchMove = (e: TouchEvent) => {
@@ -380,15 +405,25 @@ export default function LidarPage() {
         if (lastDist > 0) zoomAt(d / lastDist, f.x, f.y)
         panBy(m.x - lastMid.x, m.y - lastMid.y)
         lastDist = d; lastMid = m
-      } else if (e.touches.length === 1 && panLast && !simMode) {
+      } else if (e.touches.length === 1) {
         e.preventDefault()
-        panBy(e.touches[0].clientX - panLast.x, e.touches[0].clientY - panLast.y)
-        panLast = { x: e.touches[0].clientX, y: e.touches[0].clientY }
+        if (simMode && simActiveRef.current) {
+          const now = Date.now()
+          if (now - simThrottleRef.current < 50) return
+          simThrottleRef.current = now
+          simSendAt(e.touches[0].clientX, e.touches[0].clientY)
+        } else if (panLast) {
+          panBy(e.touches[0].clientX - panLast.x, e.touches[0].clientY - panLast.y)
+          panLast = { x: e.touches[0].clientX, y: e.touches[0].clientY }
+        }
       }
     }
     const onTouchEnd = (e: TouchEvent) => {
       if (e.touches.length < 2) lastDist = 0
-      if (e.touches.length === 0) panLast = null
+      if (e.touches.length === 0) {
+        panLast = null
+        if (simMode && simActiveRef.current) simClear()
+      }
     }
 
     canvas.addEventListener('touchstart', onTouchStart, { passive: false })
@@ -401,38 +436,15 @@ export default function LidarPage() {
       canvas.removeEventListener('touchend',   onTouchEnd)
       canvas.removeEventListener('touchcancel', onTouchEnd)
     }
-  }, [zoomAt, clientToCanvas, simMode])
+  }, [zoomAt, clientToCanvas, simMode, simSendAt, simClear])
 
   // Mouse handlers: drag-to-pan (default) / simulate objects (sim mode)
   useEffect(() => {
     const canvas = canvasRef.current; if (!canvas) return
     let panLast: { x: number; y: number } | null = null
 
-    const toMeters = (e: MouseEvent) => {
-      const rect = canvas.getBoundingClientRect()
-      const mx = (e.clientX - rect.left) * (canvas.width  / rect.width)
-      const my = (e.clientY - rect.top)  * (canvas.height / rect.height)
-      const X = (mx - (canvas.width  / 2 + offsetRef.current.x)) / scaleRef.current
-      const Y = ((canvas.height / 2 + offsetRef.current.y) - my) / scaleRef.current
-      return { X, Y }
-    }
-
-    const sendObj = (e: MouseEvent) => {
-      const cfg = deviceConfigsRef.current[activeDeviceNameRef.current]
-      if (!cfg) return
-      const { X, Y } = toMeters(e)
-      const distance = parseFloat(Math.sqrt(X * X + Y * Y).toFixed(3))
-      publish(cfg.topicObjects, JSON.stringify([{ id: simIdRef.current++, X, Y, width: 0.3, distance, pointCount: 5 }]))
-    }
-
-    const clearObj = () => {
-      const cfg = deviceConfigsRef.current[activeDeviceNameRef.current]
-      if (cfg) publish(cfg.topicObjects, '[]')
-      simActiveRef.current = false
-    }
-
     const onMouseDown = (e: MouseEvent) => {
-      if (simMode) { simActiveRef.current = true; sendObj(e) }
+      if (simMode) { simActiveRef.current = true; simSendAt(e.clientX, e.clientY) }
       else { panLast = { x: e.clientX, y: e.clientY } }
     }
 
@@ -442,7 +454,7 @@ export default function LidarPage() {
         const now = Date.now()
         if (now - simThrottleRef.current < 50) return
         simThrottleRef.current = now
-        sendObj(e)
+        simSendAt(e.clientX, e.clientY)
       } else if (panLast) {
         const rect = canvas.getBoundingClientRect()
         offsetRef.current = {
@@ -453,8 +465,8 @@ export default function LidarPage() {
       }
     }
 
-    const onMouseUp    = () => { if (simMode && simActiveRef.current) clearObj(); panLast = null }
-    const onMouseLeave = () => { if (simMode && simActiveRef.current) clearObj(); panLast = null }
+    const onMouseUp    = () => { if (simMode && simActiveRef.current) simClear(); panLast = null }
+    const onMouseLeave = () => { if (simMode && simActiveRef.current) simClear(); panLast = null }
 
     canvas.addEventListener('mousedown',  onMouseDown)
     canvas.addEventListener('mousemove',  onMouseMove)
@@ -466,7 +478,7 @@ export default function LidarPage() {
       canvas.removeEventListener('mouseup',    onMouseUp)
       canvas.removeEventListener('mouseleave', onMouseLeave)
     }
-  }, [simMode, publish])
+  }, [simMode, simSendAt, simClear])
 
   const handleConnect    = () => { setBrokerUrl(inputUrl); setConnected(true) }
   const handleDisconnect = () => {
