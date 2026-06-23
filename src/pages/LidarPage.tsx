@@ -37,13 +37,15 @@ function drawScene(
   points: Point[],
   objects: DetectedObject[],
   scale: number,
+  offsetX: number,
+  offsetY: number,
   config?: DeviceConfig,
 ) {
   const ctx = canvas.getContext('2d')!
   const W = canvas.width
   const H = canvas.height
-  const cx = W / 2
-  const cy = H / 2
+  const cx = W / 2 + offsetX
+  const cy = H / 2 + offsetY
 
   ctx.fillStyle = '#0f172a'
   ctx.fillRect(0, 0, W, H)
@@ -184,6 +186,7 @@ export default function LidarPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const rafRef    = useRef<number>(0)
   const scaleRef  = useRef(200)
+  const offsetRef = useRef({ x: 0, y: 0 })
 
   const pointsMapRef  = useRef<Map<string, Point[]>>(new Map())
   const objectsMapRef = useRef<Map<string, DetectedObject[]>>(new Map())
@@ -275,7 +278,7 @@ export default function LidarPage() {
           ? (pointsMapRef.current.get(cfg.topicRaw) ?? [])
           : []
         const objs = cfg ? (objectsMapRef.current.get(cfg.topicObjects) ?? []) : []
-        drawScene(canvasRef.current, points, objs, scaleRef.current, cfg)
+        drawScene(canvasRef.current, points, objs, scaleRef.current, offsetRef.current.x, offsetRef.current.y, cfg)
       }
       rafRef.current = requestAnimationFrame(loop)
     }
@@ -292,40 +295,101 @@ export default function LidarPage() {
     return () => ro.disconnect()
   }, [])
 
-  // Shared zoom helper (wheel / pinch / buttons all funnel through here)
-  const zoomBy = useCallback((factor: number) => {
-    scaleRef.current = Math.min(2000, Math.max(10, scaleRef.current * factor))
-    setScale(scaleRef.current)
+  // Convert a client (CSS px) coordinate to canvas-pixel space
+  const clientToCanvas = useCallback((clientX: number, clientY: number) => {
+    const canvas = canvasRef.current!
+    const rect = canvas.getBoundingClientRect()
+    return {
+      x: (clientX - rect.left) * (canvas.width  / rect.width),
+      y: (clientY - rect.top)  * (canvas.height / rect.height),
+    }
   }, [])
 
+  // Zoom keeping the world point under (fx, fy) — canvas px — fixed on screen
+  const zoomAt = useCallback((factor: number, fx: number, fy: number) => {
+    const canvas = canvasRef.current; if (!canvas) return
+    const cx = canvas.width  / 2 + offsetRef.current.x
+    const cy = canvas.height / 2 + offsetRef.current.y
+    const next = Math.min(2000, Math.max(10, scaleRef.current * factor))
+    const k = next / scaleRef.current
+    offsetRef.current = {
+      x: (fx - (fx - cx) * k) - canvas.width  / 2,
+      y: (fy - (fy - cy) * k) - canvas.height / 2,
+    }
+    scaleRef.current = next
+    setScale(next)
+  }, [])
+
+  // Zoom around canvas center (used by +/- buttons)
+  const zoomBy = useCallback((factor: number) => {
+    const canvas = canvasRef.current; if (!canvas) return
+    zoomAt(factor, canvas.width / 2, canvas.height / 2)
+  }, [zoomAt])
+
+  const recenter = useCallback(() => {
+    offsetRef.current = { x: 0, y: 0 }
+  }, [])
+
+  // Mouse wheel → zoom toward cursor
   useEffect(() => {
     const canvas = canvasRef.current; if (!canvas) return
     const onWheel = (e: WheelEvent) => {
       e.preventDefault()
-      zoomBy(e.deltaY < 0 ? 1.1 : 0.9)
+      const f = clientToCanvas(e.clientX, e.clientY)
+      zoomAt(e.deltaY < 0 ? 1.1 : 0.9, f.x, f.y)
     }
     canvas.addEventListener('wheel', onWheel, { passive: false })
     return () => canvas.removeEventListener('wheel', onWheel)
-  }, [zoomBy])
+  }, [zoomAt, clientToCanvas])
 
-  // Pinch-to-zoom for touch devices (phones / tablets)
+  // Touch: 2-finger pinch-zoom + pan, 1-finger pan (when not simulating)
   useEffect(() => {
     const canvas = canvasRef.current; if (!canvas) return
     let lastDist = 0
+    let lastMid  = { x: 0, y: 0 }
+    let panLast: { x: number; y: number } | null = null
+
     const dist = (t: TouchList) =>
       Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY)
+    const mid = (t: TouchList) => ({
+      x: (t[0].clientX + t[1].clientX) / 2,
+      y: (t[0].clientY + t[1].clientY) / 2,
+    })
+    const panBy = (clientDx: number, clientDy: number) => {
+      const rect = canvas.getBoundingClientRect()
+      offsetRef.current = {
+        x: offsetRef.current.x + clientDx * (canvas.width  / rect.width),
+        y: offsetRef.current.y + clientDy * (canvas.height / rect.height),
+      }
+    }
 
     const onTouchStart = (e: TouchEvent) => {
-      if (e.touches.length === 2) { lastDist = dist(e.touches); e.preventDefault() }
+      if (e.touches.length === 2) {
+        lastDist = dist(e.touches); lastMid = mid(e.touches); panLast = null
+        e.preventDefault()
+      } else if (e.touches.length === 1 && !simMode) {
+        panLast = { x: e.touches[0].clientX, y: e.touches[0].clientY }
+      }
     }
     const onTouchMove = (e: TouchEvent) => {
-      if (e.touches.length !== 2) return
-      e.preventDefault()
-      const d = dist(e.touches)
-      if (lastDist > 0) zoomBy(d / lastDist)
-      lastDist = d
+      if (e.touches.length === 2) {
+        e.preventDefault()
+        const d = dist(e.touches)
+        const m = mid(e.touches)
+        const f = clientToCanvas(m.x, m.y)
+        if (lastDist > 0) zoomAt(d / lastDist, f.x, f.y)
+        panBy(m.x - lastMid.x, m.y - lastMid.y)
+        lastDist = d; lastMid = m
+      } else if (e.touches.length === 1 && panLast && !simMode) {
+        e.preventDefault()
+        panBy(e.touches[0].clientX - panLast.x, e.touches[0].clientY - panLast.y)
+        panLast = { x: e.touches[0].clientX, y: e.touches[0].clientY }
+      }
     }
-    const onTouchEnd = (e: TouchEvent) => { if (e.touches.length < 2) lastDist = 0 }
+    const onTouchEnd = (e: TouchEvent) => {
+      if (e.touches.length < 2) lastDist = 0
+      if (e.touches.length === 0) panLast = null
+    }
 
     canvas.addEventListener('touchstart', onTouchStart, { passive: false })
     canvas.addEventListener('touchmove',  onTouchMove,  { passive: false })
@@ -337,18 +401,19 @@ export default function LidarPage() {
       canvas.removeEventListener('touchend',   onTouchEnd)
       canvas.removeEventListener('touchcancel', onTouchEnd)
     }
-  }, [zoomBy])
+  }, [zoomAt, clientToCanvas, simMode])
 
-  // Simulation mouse handlers
+  // Mouse handlers: drag-to-pan (default) / simulate objects (sim mode)
   useEffect(() => {
     const canvas = canvasRef.current; if (!canvas) return
+    let panLast: { x: number; y: number } | null = null
 
     const toMeters = (e: MouseEvent) => {
       const rect = canvas.getBoundingClientRect()
       const mx = (e.clientX - rect.left) * (canvas.width  / rect.width)
       const my = (e.clientY - rect.top)  * (canvas.height / rect.height)
-      const X = (mx - canvas.width  / 2) / scaleRef.current
-      const Y = (canvas.height / 2 - my) / scaleRef.current
+      const X = (mx - (canvas.width  / 2 + offsetRef.current.x)) / scaleRef.current
+      const Y = ((canvas.height / 2 + offsetRef.current.y) - my) / scaleRef.current
       return { X, Y }
     }
 
@@ -367,21 +432,29 @@ export default function LidarPage() {
     }
 
     const onMouseDown = (e: MouseEvent) => {
-      if (!simMode) return
-      simActiveRef.current = true
-      sendObj(e)
+      if (simMode) { simActiveRef.current = true; sendObj(e) }
+      else { panLast = { x: e.clientX, y: e.clientY } }
     }
 
     const onMouseMove = (e: MouseEvent) => {
-      if (!simMode || !simActiveRef.current) return
-      const now = Date.now()
-      if (now - simThrottleRef.current < 50) return
-      simThrottleRef.current = now
-      sendObj(e)
+      if (simMode) {
+        if (!simActiveRef.current) return
+        const now = Date.now()
+        if (now - simThrottleRef.current < 50) return
+        simThrottleRef.current = now
+        sendObj(e)
+      } else if (panLast) {
+        const rect = canvas.getBoundingClientRect()
+        offsetRef.current = {
+          x: offsetRef.current.x + (e.clientX - panLast.x) * (canvas.width  / rect.width),
+          y: offsetRef.current.y + (e.clientY - panLast.y) * (canvas.height / rect.height),
+        }
+        panLast = { x: e.clientX, y: e.clientY }
+      }
     }
 
-    const onMouseUp    = () => { if (simMode && simActiveRef.current) clearObj() }
-    const onMouseLeave = () => { if (simMode && simActiveRef.current) clearObj() }
+    const onMouseUp    = () => { if (simMode && simActiveRef.current) clearObj(); panLast = null }
+    const onMouseLeave = () => { if (simMode && simActiveRef.current) clearObj(); panLast = null }
 
     canvas.addEventListener('mousedown',  onMouseDown)
     canvas.addEventListener('mousemove',  onMouseMove)
@@ -465,7 +538,7 @@ export default function LidarPage() {
 
         <span className="ml-auto text-xs text-slate-500">
           縮放 <span className="text-slate-300">{scale.toFixed(0)} px/m</span>
-          <span className="ml-1">(滾輪／雙指／按鈕)</span>
+          <span className="ml-1">(縮放：滾輪／雙指；拖曳平移)</span>
         </span>
       </div>
 
@@ -557,7 +630,7 @@ export default function LidarPage() {
         <canvas
           ref={canvasRef}
           style={{ touchAction: 'none' }}
-          className={`w-full h-full block ${simMode ? 'cursor-crosshair' : ''}`}
+          className={`w-full h-full block ${simMode ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'}`}
         />
 
         {/* 縮放按鈕（觸控裝置 / 精準縮放） */}
@@ -581,6 +654,13 @@ export default function LidarPage() {
                        text-2xl leading-none flex items-center justify-center"
             title="縮小" aria-label="縮小">
             −
+          </button>
+          <button
+            onClick={recenter}
+            className="w-10 h-10 rounded bg-slate-800/80 hover:bg-slate-700 text-slate-200
+                       text-lg leading-none flex items-center justify-center"
+            title="畫面歸位（原點置中）" aria-label="畫面歸位">
+            ⌖
           </button>
         </div>
         {!connected && (
